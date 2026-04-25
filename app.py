@@ -2,6 +2,8 @@ import streamlit as st
 import json
 import datetime
 import hashlib
+import time
+import requests
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
@@ -140,8 +142,73 @@ st.markdown("""
     }
     
     .overdue { color: #e85d75; font-weight: 700; }
-    
+
     h1, h2, h3 { font-family: 'Nunito', sans-serif !important; }
+
+    /* NFL Draft styles */
+    .nfl-header {
+        background: linear-gradient(135deg, #013369 0%, #0a3d8a 60%, #d50a0a 100%);
+        border-radius: 16px;
+        padding: 22px 28px;
+        color: white;
+        margin-bottom: 18px;
+    }
+    .clock-card {
+        background: linear-gradient(135deg, #013369, #0a3d8a);
+        border-radius: 14px;
+        padding: 22px 26px;
+        color: white;
+        margin-bottom: 16px;
+        border: 2px solid #d4af37;
+        box-shadow: 0 4px 20px rgba(1,51,105,0.25);
+    }
+    .pick-row {
+        background: white;
+        border-radius: 10px;
+        padding: 12px 16px;
+        margin-bottom: 7px;
+        box-shadow: 0 1px 6px rgba(0,0,0,0.06);
+        border-left: 4px solid;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+    .pick-number {
+        font-size: 20px;
+        font-weight: 800;
+        color: #013369;
+        min-width: 40px;
+        text-align: center;
+    }
+    .pos-badge {
+        display: inline-block;
+        padding: 3px 9px;
+        border-radius: 20px;
+        font-size: 11px;
+        font-weight: 700;
+        color: white;
+        letter-spacing: 0.5px;
+    }
+    .upcoming-card {
+        background: white;
+        border-radius: 10px;
+        padding: 14px;
+        text-align: center;
+        border: 2px solid #ede6da;
+        margin-bottom: 8px;
+    }
+    .upcoming-card.on-clock {
+        background: #fff8e0;
+        border-color: #d4af37;
+    }
+    .draft-complete-banner {
+        background: linear-gradient(135deg, #1a6e1a, #2e9e2e);
+        border-radius: 14px;
+        padding: 24px;
+        color: white;
+        text-align: center;
+        margin-bottom: 16px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -238,9 +305,9 @@ if not member:
     st.stop()
 
 # ---- TABS ----
-tab_life, tab_goals, tab_wins, tab_snap, tab_grid, tab_chat = st.tabs([
-    "🎯 Life Board", "⭐ Growth Goals", "🟢 Weekly Wins", 
-    "📸 Snapshots", "🧩 Full Grid", "💬 Growth Chat"
+tab_life, tab_goals, tab_wins, tab_snap, tab_grid, tab_chat, tab_nfl = st.tabs([
+    "🎯 Life Board", "⭐ Growth Goals", "🟢 Weekly Wins",
+    "📸 Snapshots", "🧩 Full Grid", "💬 Growth Chat", "🏈 NFL Draft R2"
 ])
 
 # ==========================
@@ -741,9 +808,252 @@ with tab_chat:
     st.markdown("""
     **Dad Mode — Monthly Prompts:**
     - What felt hard?
-    - What felt easy?  
+    - What felt easy?
     - What are you proud of?
     - What do you want to try next?
-    
+
     *No fixing. No overcoaching. Just reflection.*
     """)
+
+# ==========================
+# 🏈 NFL DRAFT ROUND 2
+# ==========================
+with tab_nfl:
+    # Position → display color mapping
+    POS_COLORS = {
+        "QB": "#e85d75",
+        "RB": "#4a90d9", "FB": "#4a90d9",
+        "WR": "#5cb85c", "TE": "#e07baa",
+        "OT": "#e0aa3e", "OG": "#e0aa3e", "C": "#e0aa3e", "OL": "#e0aa3e",
+        "DE": "#9b72cf", "DT": "#9b72cf", "NT": "#9b72cf", "DL": "#9b72cf",
+        "LB": "#3aafa9", "ILB": "#3aafa9", "OLB": "#3aafa9", "MLB": "#3aafa9",
+        "CB": "#e8793a", "S": "#e8793a", "FS": "#e8793a", "SS": "#e8793a", "DB": "#e8793a",
+        "K": "#b0a898", "P": "#b0a898", "LS": "#b0a898",
+        "EDGE": "#9b72cf", "DL/DE": "#9b72cf",
+    }
+
+    @st.cache_data(ttl=45)
+    def fetch_round2_picks():
+        endpoints = [
+            "https://site.api.espn.com/apis/site/v2/sports/football/nfl/draft/picks?round=2&year=2026",
+            "https://site.api.espn.com/apis/site/v2/sports/football/nfl/draft/summary?year=2026",
+            "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/seasons/2026/draft/rounds/2/picks?limit=100",
+        ]
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; LifeDashboard/1.0)"}
+        for url in endpoints:
+            try:
+                resp = requests.get(url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    return resp.json(), url
+            except Exception:
+                continue
+        return None, None
+
+    def parse_picks(data, source_url):
+        if not data:
+            return []
+        picks = []
+        # Shape 1: {"picks": [...]}
+        raw = data.get("picks", [])
+        # Shape 2: {"rounds": [{"picks": [...]}, ...]}
+        if not raw and data.get("rounds"):
+            for rnd in data["rounds"]:
+                if rnd.get("round") == 2 or rnd.get("number") == 2:
+                    raw = rnd.get("picks", [])
+                    break
+            if not raw and len(data["rounds"]) >= 2:
+                raw = data["rounds"][1].get("picks", [])
+        # Shape 3: {"items": [...]} from core API
+        if not raw and data.get("items"):
+            raw = data["items"]
+        for p in raw:
+            # Normalise round filter: keep only round 2 picks (or all if pre-filtered)
+            rnd_num = p.get("round") or p.get("roundNumber", 0)
+            if rnd_num and rnd_num != 2:
+                continue
+            team = p.get("team") or p.get("franchise") or {}
+            athlete = p.get("athlete") or p.get("player") or None
+            picks.append({
+                "overall": p.get("overallPick") or p.get("overall", 0),
+                "round_pick": p.get("roundPick") or p.get("pickInRound", 0),
+                "team_name": team.get("displayName") or team.get("name", "Unknown"),
+                "team_abbr": team.get("abbreviation", ""),
+                "team_color": team.get("color") or team.get("alternateColor", "013369"),
+                "player_name": athlete.get("displayName") or athlete.get("fullName", "") if athlete else None,
+                "player_short": athlete.get("shortName", "") if athlete else None,
+                "position": (athlete.get("position") or {}).get("abbreviation", "?") if athlete else None,
+                "college": ((athlete.get("college") or {}).get("displayName", "")
+                            or (athlete.get("college") or "")) if athlete else None,
+                "headshot": ((athlete.get("headshot") or {}).get("href", "")) if athlete else None,
+            })
+        return picks
+
+    # ---- Header ----
+    st.markdown("""
+    <div class="nfl-header">
+        <h2 style="margin:0;color:white;font-size:26px;">🏈 2026 NFL Draft — Round 2 Live</h2>
+        <p style="margin:6px 0 0;opacity:0.85;font-size:14px;">Picks #33 through #64 · April 25, 2026 · Kansas City, MO</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ---- Controls ----
+    ctrl1, ctrl2, ctrl3 = st.columns([3, 1, 1])
+    with ctrl1:
+        auto_refresh = st.toggle("🔄 Auto-Refresh", value=False, key="nfl_auto")
+    with ctrl2:
+        refresh_sec = st.selectbox("Interval", [30, 60, 120],
+                                   format_func=lambda x: f"{x}s", key="nfl_interval")
+    with ctrl3:
+        if st.button("🔄 Refresh Now", use_container_width=True, key="nfl_refresh_btn"):
+            st.cache_data.clear()
+            st.rerun()
+
+    st.caption(f"Last refreshed: {datetime.datetime.now().strftime('%I:%M:%S %p ET')}")
+
+    # ---- Fetch & Parse ----
+    raw_data, source = fetch_round2_picks()
+    picks = parse_picks(raw_data, source)
+
+    completed = [p for p in picks if p["player_name"]]
+    pending   = [p for p in picks if not p["player_name"]]
+    total     = len(picks)
+
+    # ---- Draft Status Banner ----
+    if not picks:
+        st.markdown("""
+        <div style="background:white;border-radius:14px;padding:48px 32px;text-align:center;
+                    box-shadow:0 2px 12px rgba(0,0,0,0.06);border:2px dashed #ede6da;">
+            <div style="font-size:52px;margin-bottom:14px;">🏈</div>
+            <h3 style="color:#013369;">Round 2 Hasn't Started Yet</h3>
+            <p style="color:#7a7267;max-width:480px;margin:0 auto;">
+                Pick data will stream in as selections are made. Hit <strong>Refresh Now</strong>
+                or enable Auto-Refresh to keep this board live.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    elif not pending:
+        st.markdown(f"""
+        <div class="draft-complete-banner">
+            <div style="font-size:40px;margin-bottom:8px;">🎉</div>
+            <h3 style="margin:0;color:white;">Round 2 Complete!</h3>
+            <p style="margin:6px 0 0;opacity:0.85;">All {total} picks have been made.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    else:
+        # On the clock
+        on_clock = pending[0]
+        tc = on_clock["team_color"].lstrip("#") if on_clock["team_color"] else "013369"
+        st.markdown(f"""
+        <div class="clock-card">
+            <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;opacity:0.7;margin-bottom:6px;">
+                ⏰ On the Clock
+            </div>
+            <div style="font-size:30px;font-weight:800;line-height:1.1;">
+                {on_clock["team_name"]}
+            </div>
+            <div style="font-size:14px;opacity:0.85;margin-top:6px;">
+                Pick <strong>#{on_clock["overall"]}</strong> overall &nbsp;·&nbsp;
+                #{on_clock["round_pick"]} in Round 2
+            </div>
+            <div style="margin-top:12px;font-size:12px;opacity:0.6;">
+                {len(completed)} of {total} picks made
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ---- Progress Bar ----
+    if total > 0:
+        pct_done = len(completed) / total
+        st.progress(pct_done, text=f"Round 2: {len(completed)}/{total} picks complete")
+
+    # ---- Position Breakdown Chart ----
+    if completed:
+        pos_counts: dict[str, int] = {}
+        for p in completed:
+            pos = p["position"] or "?"
+            pos_counts[pos] = pos_counts.get(pos, 0) + 1
+
+        pos_sorted = sorted(pos_counts.items(), key=lambda x: -x[1])
+        pos_labels = [x[0] for x in pos_sorted]
+        pos_vals   = [x[1] for x in pos_sorted]
+        pos_clrs   = [POS_COLORS.get(lbl, "#b0a898") for lbl in pos_labels]
+
+        fig_pos = go.Figure(go.Bar(
+            x=pos_labels, y=pos_vals,
+            marker_color=pos_clrs,
+            text=pos_vals, textposition="outside",
+        ))
+        fig_pos.update_layout(
+            title=f"Round 2 Picks by Position ({len(completed)} made)",
+            height=220,
+            margin=dict(t=40, b=10, l=10, r=10),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(showgrid=False, showticklabels=False),
+            xaxis=dict(tickfont=dict(size=12, color="#013369")),
+            font=dict(color="#2d2a26"),
+        )
+        st.plotly_chart(fig_pos, use_container_width=True)
+
+    # ---- Completed Picks Board ----
+    if completed:
+        st.markdown(f"### ✅ Completed Picks — {len(completed)} made")
+
+        col_a, col_b = st.columns(2)
+        for idx, pick in enumerate(sorted(completed, key=lambda x: x["overall"] or 0)):
+            pos       = pick["position"] or "?"
+            pos_color = POS_COLORS.get(pos, "#b0a898")
+            college   = pick["college"] or ""
+            abbr      = pick["team_abbr"] or ""
+
+            card_html = f"""
+            <div class="pick-row" style="border-left-color:{pos_color};">
+                <span class="pick-number">#{pick['overall']}</span>
+                <div style="flex:1;min-width:0;">
+                    <div style="font-weight:700;font-size:14px;white-space:nowrap;overflow:hidden;
+                                text-overflow:ellipsis;">{pick['player_name']}</div>
+                    <div style="font-size:11px;color:#7a7267;margin-top:2px;">
+                        {abbr} &nbsp;·&nbsp; {college}
+                    </div>
+                </div>
+                <span class="pos-badge" style="background:{pos_color};">{pos}</span>
+            </div>
+            """
+            if idx % 2 == 0:
+                col_a.markdown(card_html, unsafe_allow_html=True)
+            else:
+                col_b.markdown(card_html, unsafe_allow_html=True)
+
+    # ---- Upcoming Picks ----
+    if pending:
+        st.markdown(f"### 🕐 Coming Up — {len(pending)} picks remaining")
+        up_cols = st.columns(4)
+        for i, pick in enumerate(pending[:8]):
+            is_next = (i == 0)
+            card_cls = "upcoming-card on-clock" if is_next else "upcoming-card"
+            label    = "⏰ ON THE CLOCK" if is_next else f"Pick #{pick['round_pick']} R2"
+            with up_cols[i % 4]:
+                st.markdown(f"""
+                <div class="{card_cls}">
+                    <div style="font-size:10px;color:#7a7267;letter-spacing:0.5px;
+                                font-weight:600;text-transform:uppercase;">{label}</div>
+                    <div style="font-size:22px;font-weight:800;color:#013369;
+                                margin:4px 0;">#{pick['overall']}</div>
+                    <div style="font-size:12px;font-weight:600;color:#2d2a26;
+                                line-height:1.3;">{pick['team_name']}</div>
+                    <div style="font-size:10px;color:#b0a898;margin-top:2px;">
+                        {pick['team_abbr']}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+    # ---- Auto-refresh (runs after full render) ----
+    if auto_refresh and picks is not None:
+        countdown_slot = st.empty()
+        for remaining in range(refresh_sec, 0, -1):
+            countdown_slot.caption(f"⏳ Auto-refreshing in {remaining}s…")
+            time.sleep(1)
+        st.cache_data.clear()
+        st.rerun()
